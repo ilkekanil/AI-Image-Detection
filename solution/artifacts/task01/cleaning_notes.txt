@@ -1,0 +1,25 @@
+Task 1.1 cleaning notes
+
+Total images found in data/train: 29688
+Valid images: 29688
+Corrupted/skipped images: 0
+
+Class distribution:
+- source_class 0: 4948
+- source_class 1: 4948
+- source_class 2: 4948
+- source_class 3: 4948
+- source_class 4: 4948
+- source_class 5: 4948
+
+RGB conversion:
+All valid images are converted to RGB so that downstream models receive a consistent three-channel input.
+This avoids special cases caused by grayscale, palette, or other image modes.
+
+Resize to 224x224:
+All valid images are resized to 224x224 to remove original image-size shortcuts and to keep later CPU
+training efficient. The operation is deterministic and therefore reproducible.
+
+No augmentation:
+Task 1.1 is about exploration and cleaning, not robustness training. Random crops, color jitter, blur,
+compression changes, and other augmentation methods are intentionally left for later tasks.

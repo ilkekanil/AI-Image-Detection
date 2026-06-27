@@ -1,0 +1,4 @@
+AML DATA/train/*.parquet
+.DS_Store
+__pycache__/
+*.pyc
