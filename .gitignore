@@ -2,3 +2,9 @@ AML DATA/train/*.parquet
 .DS_Store
 __pycache__/
 *.pyc
+venv/
+artifacts/task03_FINAL_060/
+solution/artifacts/task03_FINAL_060/
+solution/artifacts/task03_best_128/
+solution/artifacts/task03_finetune_backup/
+solution/artifacts/task03_strong_backup/
