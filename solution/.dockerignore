@@ -1,0 +1,16 @@
+# The exercise mounts data at runtime and requires it to remain read-only.
+data/
+AML DATA/
+
+# Models, cleaned images, plots, and predictions are regenerated at runtime.
+artifacts/
+
+# Local/editor/build metadata must not inflate or contaminate the image.
+__pycache__/
+*.py[cod]
+.DS_Store
+.git/
+.gitignore
+.venv/
+venv/
+env/
