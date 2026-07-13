@@ -1,0 +1,12 @@
+split,sample_index,source_class,true_label,predicted_label,ai_score,classification_threshold,correct,error_category,distance_to_threshold,selection_reason
+validation,154,4,1,1,0.9999374151229858,0.8164787888526917,True,true positive,0.1834586262702942,confident true positive
+validation_augmented,586,4,1,1,0.9999622106552124,0.8164787888526917,True,true positive,0.18348342180252075,confident true positive
+validation,951,0,0,0,0.09780683368444443,0.8164787888526917,True,true negative,0.7186719551682472,confident true negative
+validation_augmented,614,0,0,0,0.11584263294935226,0.8164787888526917,True,true negative,0.7006361559033394,confident true negative
+validation,144,0,0,1,0.9659821391105652,0.8164787888526917,False,false positive,0.14950335025787354,confident false positive
+validation_augmented,66,0,0,1,0.979151725769043,0.8164787888526917,False,false positive,0.16267293691635132,confident false positive
+validation,492,0,0,1,0.9656355977058411,0.8164787888526917,False,false positive,0.14915680885314941,confident false positive
+validation,937,3,1,0,0.11974761635065079,0.8164787888526917,False,false negative,0.6967311725020409,confident false negative
+validation_augmented,1059,1,1,0,0.09457504004240036,0.8164787888526917,False,false negative,0.7219037488102913,confident false negative
+validation,339,1,1,0,0.1714322865009308,0.8164787888526917,False,false negative,0.6450465023517609,confident false negative
+validation,89,1,1,1,0.8180521130561829,0.8164787888526917,True,true positive,0.001573324203491211,uncertain near threshold

@@ -1,0 +1,30 @@
+{
+  "validation": {
+    "number_of_samples": 1124,
+    "expected_samples": 1124,
+    "partial": false,
+    "accuracy": 0.7695729537366548,
+    "ai_recall": 0.7574786324786325,
+    "false_positive_rate_on_real": 0.1702127659574468,
+    "precision": 0.9568151147098516,
+    "true_positives": 709,
+    "true_negatives": 156,
+    "false_positives": 32,
+    "false_negatives": 227,
+    "requested_sample_cap": null
+  },
+  "validation_augmented": {
+    "number_of_samples": 1124,
+    "expected_samples": 1124,
+    "partial": false,
+    "accuracy": 0.641459074733096,
+    "ai_recall": 0.5997865528281751,
+    "false_positive_rate_on_real": 0.1497326203208556,
+    "precision": 0.9525423728813559,
+    "true_positives": 562,
+    "true_negatives": 159,
+    "false_positives": 28,
+    "false_negatives": 375,
+    "requested_sample_cap": null
+  }
+}
