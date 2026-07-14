@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Task 1.1: Dataset exploration and deterministic cleaning.
+"""
+Task 1.1: Baseline dataset cleaning.
 
-This script only reads data/train/*.parquet and writes all outputs below
-artifacts/task01/. It is designed to run inside the submitted solution folder:
-
+Run this from the solution root:
     python clean.py --timeout_seconds 600
 
-The cleaning step is intentionally deterministic. It converts each readable image
-to RGB and resizes it to 224x224, but it does not apply random augmentation.
+Pulls parquets from `data/train/`, dumps everything to `artifacts/task01/`. 
+No random transforms here—just standardizing everything to RGB 224x224.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -21,9 +19,8 @@ import time
 from io import BytesIO
 from pathlib import Path
 
-# Matplotlib may try to write caches to the user's home directory. In Docker or
-# restricted environments, a temporary directory is safer and keeps the script
-# self-contained.
+# Set Matplotlib's cache to a temp directory to avoid write-permission
+# errors in Docker/restricted environments and keep the script self-contained.
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "amls_matplotlib"))
 
 import matplotlib
