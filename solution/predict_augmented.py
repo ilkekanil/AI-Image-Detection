@@ -26,7 +26,7 @@ def main():
     if not os.path.exists(predict_dir):
         predict_dir = os.path.join("..", "AML DATA", "predict")
 
-    # Re-build architecture and load the best saved checkpoint parameters
+    # Rebuild the model and load our best saved weights
     model = StrongerCNNDetector(channels=32)
     ckpt = os.path.join(out_dir, "best_model_augmented.pt")
     if not os.path.exists(ckpt):
@@ -42,7 +42,7 @@ def main():
     else:
         threshold = 0.50
 
-    # Ensure inference test files are also processed at 128px
+    # Resize test images to 128px to match our Task 3 training setup
     eval_transform = transforms.Compose([
         transforms.Resize((128, 128)),
         transforms.ToTensor(),
@@ -78,7 +78,7 @@ def main():
                     ids.extend(row_ids.numpy().tolist())
                     preds.extend(decisions.numpy().tolist())
 
-    # Format output precisely as required by submission guidelines
+    # Format and sort predictions to match the expected submission format
     df = pd.DataFrame({"row_id": ids, "predicted_label": preds})
     df = df.sort_values(by="row_id")
     out_csv = os.path.join(out_dir, "predictions.csv")
