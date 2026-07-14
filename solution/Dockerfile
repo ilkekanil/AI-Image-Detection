@@ -1,10 +1,10 @@
-# Python 3.11 and requires a CPU-only image.
+# Use Python 3.11 CPU-only base image
 FROM python:3.11-slim
 
 WORKDIR /workspace/solution
 
-# Keep Python deterministic/non-interactive and place runtime caches below the
-# only writable project directory required by the exercise specification.
+# Keep Python quiet/deterministic and route all temp caches to the writable artifacts 
+# directory (the only folder we're guaranteed to have write access to during grading).
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONHASHSEED=0 \
@@ -15,13 +15,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OMP_NUM_THREADS=8 \
     MKL_NUM_THREADS=8
 
-# scikit-learn's Linux wheel uses the GNU OpenMP runtime. No compiler or GPU
-# libraries are needed because all Python dependencies have binary CPU wheels.
+# Install libgomp1 (needed for scikit-learn's OpenMP runtime).
+# No heavy compilers or GPU libraries are required since we use pre-built CPU wheels.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency metadata first so Docker can cache this expensive layer.
+# Copy requirements first to take advantage of Docker's layer caching
 COPY requirements.txt ./requirements.txt
 
 RUN python -m pip install --upgrade pip \
@@ -31,10 +31,10 @@ RUN python -m pip install --upgrade pip \
         torch==2.5.1 \
         torchvision==0.20.1
 
-# data/ and generated artifacts/ are excluded by .dockerignore. During grading,
-# data/ is mounted read-only and every script writes derived files to artifacts/.
+# Copy the remaining project files. Note: data/ and artifacts/ are ignored 
+# via .dockerignore because the grading environment mounts data/ as read-only.
 COPY . .
 RUN mkdir -p artifacts/.matplotlib artifacts/.cache
 
-# Fail the build early if the scientific stack or project modules are broken.
+# Sanity check the build to make sure imports and local scripts aren't broken
 RUN python -c "import matplotlib, numpy, pandas, PIL, pyarrow, sklearn, torch, torchvision; import clean, prepare, train, train_augmented, predict, predict_augmented, explain"
