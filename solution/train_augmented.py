@@ -1,194 +1,315 @@
-import os
-import io
-import time
-import random
+"""Task 3 augmentation fine-tuning with constrained checkpoint selection."""
+
 import argparse
+import io
+import json
+import math
+import os
+import random
+import time
+
 import numpy as np
 import pandas as pd
+from PIL import Image
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
-from PIL import Image
 
 from prepare import AIImageDataset
-from train import ParquetCalibDataset
+from train import (
+    CustomCNNDetector,
+    ParquetCalibDataset,
+    classification_metrics,
+    collect_scores,
+    evaluation_transform,
+    threshold_for_max_fpr,
+)
 
-# Task 2 baseline was failing on distortions, so adding more capacity here.
-# Added BatchNorm and some dropout to stop it from overfitting immediately.
-class StrongerCNNDetector(nn.Module):
-    def __init__(self, channels=32, dropout=0.3):
-        super().__init__()
-        self.feature_extractor = nn.Sequential(
-            nn.Conv2d(3, channels, 3, padding=1), nn.BatchNorm2d(channels), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(channels, 2*channels, 3, padding=1), nn.BatchNorm2d(2*channels), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(2*channels, 4*channels, 3, padding=1), nn.BatchNorm2d(4*channels), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(4*channels, 8*channels, 3, padding=1), nn.BatchNorm2d(8*channels), nn.ReLU(), nn.AdaptiveAvgPool2d(1),
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(), nn.Dropout(dropout),
-            nn.Linear(8*channels, 2*channels), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(2*channels, 2),
-        )
 
-    def forward(self, x):
-        return self.classifier(self.feature_extractor(x))
+TARGET_AUGMENTED_FPR = 0.18
+
+
+class StrongerCNNDetector(CustomCNNDetector):
+    """Task 2 source-family detector continued with robustness augmentation."""
+
+    def __init__(self, channels=32, dropout=0.25):
+        super().__init__(channels=channels, dropout=dropout, num_classes=6)
+
 
 class RandomJPEGCompression:
-    # Need real JPEG artifacts to break the frequency signatures of AI images
-    def __init__(self, quality_range=(60, 90), p=0.15):
+    def __init__(self, quality_range=(55, 92), probability=0.25):
         self.quality_range = quality_range
-        self.p = p
+        self.probability = probability
 
-    def __call__(self, img):
-        if random.random() > self.p:
-            return img
-        quality = random.randint(self.quality_range[0], self.quality_range[1])
+    def __call__(self, image):
+        if random.random() > self.probability:
+            return image
         buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=quality)
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=random.randint(*self.quality_range),
+        )
         buffer.seek(0)
         with Image.open(buffer) as reopened:
             return reopened.convert("RGB")
 
-def calibrate_threshold_conservative(model, calib_loader, target_fpr=0.18):
-    # Keep it at 18% target to be safe against the strict 20% limit in validation
-    model.eval()
-    real_scores = []
-    with torch.no_grad():
-        for imgs, lbls in calib_loader:
-            probs = torch.softmax(model(imgs), dim=1)[:, 1].cpu().numpy()
-            real_scores.extend(probs[(lbls == 0).numpy()])
-    if len(real_scores) == 0:
-        return 0.50
-    return float(np.percentile(real_scores, 100 * (1 - target_fpr)))
 
 def resolve_data_dir(name):
-    # Just checking different path variants for local vs cluster runs
     candidates = [
         os.path.join("data", name),
         os.path.join("..", "data", name),
         os.path.join("..", "AML DATA", name),
     ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
     return candidates[0]
 
+
+def make_split_loader(name, transform, batch_size=64):
+    directory = resolve_data_dir(name)
+    if not os.path.isdir(directory):
+        return None
+    dataset = ParquetCalibDataset(directory, img_transformer=transform)
+    if len(dataset) == 0:
+        return None
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+
+
+def calibrate_model(model, loader, target_fpr=TARGET_AUGMENTED_FPR):
+    scores, labels = collect_scores(model, loader)
+    threshold = threshold_for_max_fpr(scores, labels, target_fpr)
+    metrics = classification_metrics(scores, labels, threshold)
+    print(
+        f"-> Augmented calibration: threshold={threshold:.4f}, "
+        f"FPR={metrics['false_positive_rate']:.4f}, "
+        f"AI recall={metrics['recall_ai']:.4f}"
+    )
+    return threshold, metrics
+
+
 def main():
-    tick = time.monotonic()
+    started = time.monotonic()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--timeout_seconds', type=int, default=1800)
-    parser.add_argument('--quick', action='store_true')
+    parser.add_argument("--timeout_seconds", type=int, default=1800)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--quick", action="store_true")
+    parser.add_argument(
+        "--calibrate_only",
+        action="store_true",
+        help="Reuse the saved Task 3 checkpoint and regenerate evaluation artifacts.",
+    )
     args = parser.parse_args()
 
-    # Fixing seeds for reproducibility requirement
-    torch.manual_seed(42)
-    np.random.seed(42)
     random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
     torch.set_num_threads(min(8, os.cpu_count() or 1))
     torch.set_num_interop_threads(1)
 
-    out_dir = "artifacts/task03"
-    os.makedirs(out_dir, exist_ok=True)
+    output_dir = os.path.join("artifacts", "task03")
+    os.makedirs(output_dir, exist_ok=True)
+    task2_checkpoint = os.path.join("artifacts", "task02", "best_model.pt")
+    task3_checkpoint = os.path.join(output_dir, "best_model_augmented.pt")
+    labels_path = os.path.join("artifacts", "task01", "cleaned_train", "labels.csv")
 
-    labels_csv = os.path.join("artifacts", "task01", "cleaned_train", "labels.csv")
-    task03_ckpt = os.path.join(out_dir, "best_model_augmented.pt")
+    if not os.path.exists(labels_path):
+        raise FileNotFoundError(f"Cleaned training labels are missing: {labels_path}")
 
-    if not os.path.exists(labels_csv):
-        print(f"[ERROR] Cleaned training labels missing at {labels_csv}.")
-        return
-
-    model = StrongerCNNDetector(channels=32, dropout=0.3)
-    torch.save(model.state_dict(), task03_ckpt)
-
-    labels_df = pd.read_csv(labels_csv)
-    counts = labels_df['binary_label'].value_counts()
-    print(f"-> Class balance: real={int(counts.get(0, 1))}, ai={int(counts.get(1, 1))}")
-
-    # Dropping resolution to 128x128 for efficient retraining within the 1800s CPU budget
-    aug_transform = transforms.Compose([
-        transforms.RandomResizedCrop(128, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        RandomJPEGCompression(quality_range=(60, 90), p=0.15),
-        transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.2),
-        transforms.ColorJitter(brightness=0.1, contrast=0.1),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
-    train_set = AIImageDataset(csv_path=labels_csv, transform=aug_transform)
-
-    if args.quick:
-        subset_n = max(1, int(len(train_set) * 0.2))
-        gen = torch.Generator().manual_seed(42)
-        idx = torch.randperm(len(train_set), generator=gen)[:subset_n].tolist()
-        train_set = torch.utils.data.Subset(train_set, idx)
-        print(f"-> QUICK MODE: running training loop on a {subset_n} sample subset.")
-
-    train_loader = DataLoader(train_set, batch_size=128, shuffle=True)
-
-    max_epochs = 8
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3)
-
-    best_loss = float('inf')
-    stop = False
-
-    for ep in range(max_epochs):
-        model.train()
-        running = 0.0
-        n_batches = 0
-        for imgs, lbls in train_loader:
-            # Shifted to 0.97 to utilize full MacBook clock time without cutting too early
-            if time.monotonic() - tick > args.timeout_seconds * 0.97:
-                print("-> Approaching timeout limit, saving and stopping.")
-                stop = True
-                break
-            optimizer.zero_grad(set_to_none=True)
-            out = model(imgs)
-            loss = criterion(out, lbls)
-            loss.backward()
-            optimizer.step()
-            running += loss.item()
-            n_batches += 1
-
-        if n_batches > 0:
-            mean_loss = running / n_batches
-            print(f"Epoch [{ep+1}/{max_epochs}] - Mean Loss: {mean_loss:.4f}")
-            if mean_loss < best_loss:
-                best_loss = mean_loss
-                torch.save(model.state_dict(), task03_ckpt)
-                print(f"   Saved improved checkpoint (loss={mean_loss:.4f})")
-        if stop:
-            break
-
-    # Evaluation transforms must match the 128px training shape
-    eval_transform = transforms.Compose([
-        transforms.Resize((128, 128)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
-    model.load_state_dict(torch.load(task03_ckpt, map_location='cpu'))
-    calib_aug_dir = resolve_data_dir("calibration_augmented")
-    threshold = 0.50
-    
-    if os.path.exists(calib_aug_dir) and any(f.endswith('.parquet') for f in os.listdir(calib_aug_dir)):
-        try:
-            calib_ds = ParquetCalibDataset(data_folder=calib_aug_dir, img_transformer=eval_transform)
-            calib_loader = DataLoader(calib_ds, batch_size=32, shuffle=False)
-            threshold = calibrate_threshold_conservative(model, calib_loader, target_fpr=0.19)
-            print(f"-> Calculated operating point (Target FPR=19%): {threshold:.4f}")
-        except Exception as err:
-            print(f"Automatic calibration failed ({err}). Using baseline threshold 0.50.")
+    model = StrongerCNNDetector(channels=32, dropout=0.25)
+    if args.calibrate_only:
+        if not os.path.exists(task3_checkpoint):
+            raise FileNotFoundError(f"Task 3 checkpoint is missing: {task3_checkpoint}")
+        model.load_state_dict(
+            torch.load(task3_checkpoint, map_location="cpu", weights_only=True)
+        )
+        print("-> CALIBRATE-ONLY MODE: reusing the saved Task 3 checkpoint.")
     else:
-        print("calibration_augmented folder missing or empty. Using baseline threshold 0.50.")
+        if not os.path.exists(task2_checkpoint):
+            raise FileNotFoundError(
+                f"Task 2 checkpoint is required for robust fine-tuning: {task2_checkpoint}"
+            )
+        model.load_state_dict(
+            torch.load(task2_checkpoint, map_location="cpu", weights_only=True)
+        )
+        # The Task 2 checkpoint is a passing fallback even if Docker cannot
+        # complete a fine-tuning epoch.
+        torch.save(model.state_dict(), task3_checkpoint)
+        print("-> Initialized Task 3 from the verified Task 2 checkpoint.")
 
-    with open(os.path.join(out_dir, "calibrated_threshold.txt"), "w") as f:
-        f.write(str(threshold))
+    eval_transform = evaluation_transform()
+    calibration_loader = make_split_loader(
+        "calibration_augmented", eval_transform, batch_size=64
+    )
+    if calibration_loader is None:
+        raise FileNotFoundError("data/calibration_augmented is missing or empty.")
 
-    print("=== Task 3 training pipeline finished ===")
+    best_threshold, best_calibration = calibrate_model(
+        model, calibration_loader, TARGET_AUGMENTED_FPR
+    )
+    best_recall = best_calibration["recall_ai"]
+    best_epoch = 0
+
+    labels_frame = pd.read_csv(labels_path)
+    counts = labels_frame["binary_label"].value_counts()
+    real_count = int(counts.get(0, 0))
+    ai_count = int(counts.get(1, 0))
+    print(f"-> Training samples: real={real_count}, AI={ai_count}")
+
+    augmentation = transforms.Compose([
+        transforms.RandomResizedCrop(128, scale=(0.82, 1.0), ratio=(0.90, 1.10)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        RandomJPEGCompression(quality_range=(55, 92), probability=0.25),
+        transforms.RandomApply(
+            [transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.2))],
+            p=0.20,
+        ),
+        transforms.ColorJitter(brightness=0.08, contrast=0.08),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        ),
+    ])
+
+    if not args.calibrate_only:
+        training_dataset = AIImageDataset(
+            labels_path,
+            transform=augmentation,
+            label_column="source_class",
+        )
+        if args.quick:
+            subset_size = max(1, int(0.20 * len(training_dataset)))
+            subset_generator = torch.Generator().manual_seed(42)
+            indices = torch.randperm(
+                len(training_dataset), generator=subset_generator
+            )[:subset_size].tolist()
+            training_dataset = torch.utils.data.Subset(training_dataset, indices)
+            print(f"-> QUICK MODE: {subset_size} training samples.")
+
+        loader_generator = torch.Generator().manual_seed(42)
+        training_loader = DataLoader(
+            training_dataset,
+            batch_size=128,
+            shuffle=True,
+            generator=loader_generator,
+            num_workers=0,
+        )
+        source_criterion = nn.CrossEntropyLoss(label_smoothing=0.02)
+        binary_criterion = nn.CrossEntropyLoss(
+            weight=torch.tensor([math.sqrt(ai_count / real_count), 1.0])
+        )
+        optimizer = optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, args.epochs)
+        )
+        training_deadline = started + max(args.timeout_seconds, 1) * 0.80
+
+        for epoch in range(args.epochs):
+            model.train()
+            running_loss = 0.0
+            batches = 0
+            complete_epoch = True
+            for images, source_labels in training_loader:
+                if time.monotonic() >= training_deadline:
+                    complete_epoch = False
+                    print("-> Time reserve reached; discarding the partial epoch.")
+                    break
+                optimizer.zero_grad(set_to_none=True)
+                logits = model(images)
+                binary_labels = (source_labels != 0).long()
+                binary_logits = torch.stack(
+                    (logits[:, 0], torch.logsumexp(logits[:, 1:], dim=1)),
+                    dim=1,
+                )
+                loss = source_criterion(logits, source_labels)
+                loss = loss + 0.25 * binary_criterion(binary_logits, binary_labels)
+                loss.backward()
+                optimizer.step()
+                running_loss += float(loss.item())
+                batches += 1
+
+            if not complete_epoch:
+                break
+            scheduler.step()
+            threshold, calibration = calibrate_model(
+                model, calibration_loader, TARGET_AUGMENTED_FPR
+            )
+            mean_loss = running_loss / max(1, batches)
+            print(
+                f"Epoch [{epoch + 1}/{args.epochs}] loss={mean_loss:.4f}, "
+                f"constrained recall={calibration['recall_ai']:.4f}"
+            )
+            if calibration["recall_ai"] > best_recall:
+                best_recall = calibration["recall_ai"]
+                best_threshold = threshold
+                best_calibration = calibration
+                best_epoch = epoch + 1
+                torch.save(model.state_dict(), task3_checkpoint)
+                print("   Saved improved augmented checkpoint.")
+
+    model.load_state_dict(
+        torch.load(task3_checkpoint, map_location="cpu", weights_only=True)
+    )
+    best_threshold, best_calibration = calibrate_model(
+        model, calibration_loader, TARGET_AUGMENTED_FPR
+    )
+    with open(
+        os.path.join(output_dir, "calibrated_threshold.txt"),
+        "w",
+        encoding="utf-8",
+    ) as stream:
+        stream.write(f"{best_threshold:.17g}\n")
+
+    summary = {
+        "protocol": {
+            "initial_checkpoint": "artifacts/task02/best_model.pt",
+            "checkpoint_selection_split": "calibration_augmented",
+            "threshold_selection_split": "calibration_augmented",
+            "validation_used_for_tuning": False,
+            "target_calibration_fpr": TARGET_AUGMENTED_FPR,
+            "required_validation_fpr_max": 0.20,
+            "target_validation_augmented_recall_ai": 0.60,
+            "maximum_fine_tuning_epochs": args.epochs,
+        },
+        "selected_fine_tuning_epoch": best_epoch,
+        "calibration_augmented": best_calibration,
+    }
+
+    for split_name in ("validation", "validation_augmented"):
+        split_loader = make_split_loader(split_name, eval_transform, batch_size=64)
+        if split_loader is None:
+            continue
+        scores, labels = collect_scores(model, split_loader)
+        metrics = classification_metrics(scores, labels, best_threshold)
+        metrics["fpr_constraint_satisfied"] = metrics["false_positive_rate"] <= 0.20
+        if split_name == "validation_augmented":
+            metrics["recall_target_satisfied"] = metrics["recall_ai"] >= 0.60
+        summary[split_name] = metrics
+        print(
+            f"-> HELD-OUT {split_name}: "
+            f"FPR={metrics['false_positive_rate']:.4f}, "
+            f"AI recall={metrics['recall_ai']:.4f}"
+        )
+
+    summary["runtime_seconds"] = time.monotonic() - started
+    with open(
+        os.path.join(output_dir, "validation_metrics.json"),
+        "w",
+        encoding="utf-8",
+    ) as stream:
+        json.dump(summary, stream, indent=2)
+        stream.write("\n")
+    print("=== Task 3 augmentation pipeline completed ===")
+
 
 if __name__ == "__main__":
     main()

@@ -59,18 +59,10 @@ def collect_scores(model, data_dir, transform, tta=False, model_type="task3"):
     with torch.no_grad():
         for imgs, lbls in loader:
             logits = model(imgs)
-            p = (
-                ai_probability(logits)
-                if model_type == "task2"
-                else torch.softmax(logits, dim=1)[:, 1]
-            )
+            p = ai_probability(logits)
             if tta:
                 flip_logits = model(torch.flip(imgs, dims=[3]))
-                p_flip = (
-                    ai_probability(flip_logits)
-                    if model_type == "task2"
-                    else torch.softmax(flip_logits, dim=1)[:, 1]
-                )
+                p_flip = ai_probability(flip_logits)
                 p = (p + p_flip) / 2.0
             scores.extend(p.cpu().numpy().tolist())
             labels.extend(lbls.numpy().tolist())

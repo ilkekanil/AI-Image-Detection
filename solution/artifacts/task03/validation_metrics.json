@@ -1,0 +1,50 @@
+{
+  "protocol": {
+    "initial_checkpoint": "artifacts/task02/best_model.pt",
+    "checkpoint_selection_split": "calibration_augmented",
+    "threshold_selection_split": "calibration_augmented",
+    "validation_used_for_tuning": false,
+    "target_calibration_fpr": 0.18,
+    "required_validation_fpr_max": 0.2,
+    "target_validation_augmented_recall_ai": 0.6,
+    "maximum_fine_tuning_epochs": 3
+  },
+  "selected_fine_tuning_epoch": 3,
+  "calibration_augmented": {
+    "samples": 1924,
+    "real_samples": 321,
+    "ai_samples": 1603,
+    "threshold": 0.8342371582984924,
+    "false_positives": 57,
+    "false_positive_rate": 0.17757009345794392,
+    "true_positives": 1076,
+    "recall_ai": 0.6712414223331253,
+    "accuracy": 0.6964656964656964
+  },
+  "validation": {
+    "samples": 1124,
+    "real_samples": 188,
+    "ai_samples": 936,
+    "threshold": 0.8342371582984924,
+    "false_positives": 20,
+    "false_positive_rate": 0.10638297872340426,
+    "true_positives": 811,
+    "recall_ai": 0.8664529914529915,
+    "accuracy": 0.8709964412811388,
+    "fpr_constraint_satisfied": true
+  },
+  "validation_augmented": {
+    "samples": 1124,
+    "real_samples": 187,
+    "ai_samples": 937,
+    "threshold": 0.8342371582984924,
+    "false_positives": 29,
+    "false_positive_rate": 0.15508021390374332,
+    "true_positives": 665,
+    "recall_ai": 0.7097118463180363,
+    "accuracy": 0.7322064056939501,
+    "fpr_constraint_satisfied": true,
+    "recall_target_satisfied": true
+  },
+  "runtime_seconds": 726.4804460409996
+}

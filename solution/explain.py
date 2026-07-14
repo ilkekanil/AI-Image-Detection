@@ -41,6 +41,7 @@ from PIL import Image, ImageOps
 from torch.utils.data import DataLoader, Subset
 
 from train import ParquetCalibDataset
+from train import ai_probability
 from train_augmented import StrongerCNNDetector, resolve_data_dir as pipeline_resolve_data_dir
 
 
@@ -225,7 +226,7 @@ def evaluate_split(
             save_results(rows, partial_csv)
             return False
         with torch.no_grad():
-            scores = torch.softmax(model(images.cpu()), dim=1)[:, 1].cpu().numpy()
+            scores = ai_probability(model(images.cpu())).cpu().numpy()
         label_values = labels.cpu().numpy().astype(int)
         batch_indices = indices[offset : offset + len(label_values)]
         for local_index, true_label, score in zip(batch_indices, label_values, scores):
@@ -383,8 +384,9 @@ def find_last_convolution(model: nn.Module) -> tuple[str, nn.Conv2d]:
 class GradCAM:
     """Grad-CAM using safe forward/full-backward hooks on a convolutional layer."""
 
-    def __init__(self, model: nn.Module, target_layer: nn.Module):
+    def __init__(self, model: nn.Module, target_layer: nn.Module, threshold: float):
         self.model = model
+        self.threshold = threshold
         self.activations: torch.Tensor | None = None
         self.gradients: torch.Tensor | None = None
         self._forward_handle = target_layer.register_forward_hook(self._save_activations)
@@ -404,8 +406,17 @@ class GradCAM:
         self.gradients = None
         self.model.zero_grad(set_to_none=True)
         logits = self.model(image_tensor.unsqueeze(0).cpu())
-        explained_class = int(logits.argmax(dim=1).item()) if target_class is None else int(target_class)
-        logits[0, explained_class].backward()
+        binary_score = ai_probability(logits)[0]
+        explained_class = (
+            int(float(binary_score.detach()) >= self.threshold)
+            if target_class is None
+            else int(target_class)
+        )
+        # Explain the aggregate real-vs-AI decision rather than one individual
+        # generator-family logit.
+        ai_logit = torch.logsumexp(logits[0, 1:], dim=0)
+        binary_logit = ai_logit - logits[0, 0]
+        (binary_logit if explained_class == 1 else -binary_logit).backward()
         if self.activations is None or self.gradients is None:
             raise RuntimeError("Grad-CAM hooks did not capture activations and gradients.")
         weights = self.gradients.mean(dim=(2, 3), keepdim=True)
@@ -475,7 +486,7 @@ def occlude(image: Image.Image, box: tuple[int, int, int, int]) -> Image.Image:
 def ai_score(model: nn.Module, image: Image.Image) -> float:
     with torch.no_grad():
         logits = model(preprocess_display_image(image).unsqueeze(0).cpu())
-        return float(torch.softmax(logits, dim=1)[0, 1].item())
+        return float(ai_probability(logits)[0].item())
 
 
 def class_label(value: int) -> str:
@@ -896,8 +907,9 @@ def write_report(
 
 The final Task 1.3 `StrongerCNNDetector` checkpoint was explained with Grad-CAM at convolutional layer
 `{layer_name}`. Grad-CAM is appropriate because this CNN retains spatial convolutional feature maps before
-global average pooling. Each displayed map uses the logit of the model's predicted class, ReLU, per-image
-normalization, and bilinear resizing. The saved calibrated Task 1.3 threshold was {threshold:.6f}.
+global average pooling. Each displayed map uses the aggregate binary AI-versus-real logit (combining source
+classes 1--5), ReLU, per-image normalization, and bilinear resizing. The saved calibrated Task 1.3 threshold
+was {threshold:.6f}.
 
 ## Evaluation
 
@@ -1024,7 +1036,7 @@ def main() -> None:
     perturbations = pd.DataFrame()
     attention = pd.DataFrame()
     visual_records: list[dict] = []
-    with GradCAM(model, target_layer) as cam:
+    with GradCAM(model, target_layer, threshold) as cam:
         perturbations, visual_records = analyze_selected(
             model,
             cam,
