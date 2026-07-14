@@ -1,6 +1,7 @@
 import os
 import io
 import argparse
+import time
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -37,6 +38,8 @@ def main():
     cli_args_parser = argparse.ArgumentParser()
     cli_args_parser.add_argument('--timeout_seconds', type=int, default=600)
     parsed_runtime_args = cli_args_parser.parse_args()
+    started = time.monotonic()
+    deadline = started + max(parsed_runtime_args.timeout_seconds, 1) * 0.95
 
     destination_artifacts_dir = "artifacts/task02"
     os.makedirs(destination_artifacts_dir, exist_ok=True)
@@ -80,12 +83,20 @@ def main():
         ])
         
         for targeted_parquet in discovered_parquets:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "predict.py reached its time limit; no partial predictions were written."
+                )
             print(f"-> Processing current evaluation target: {os.path.basename(targeted_parquet)}")
             runtime_dataset = InferenceImageDataset(parquet_path=targeted_parquet, target_transform=evaluation_tensor_transforms) 
             runtime_loader = DataLoader(runtime_dataset, batch_size=32, shuffle=False)
 
             with torch.no_grad():
                 for process_images, process_ids in runtime_loader:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "predict.py reached its time limit; no partial predictions were written."
+                        )
                     raw_logits = evaluation_engine(process_images)
                     synthetic_class_probabilities = ai_probability(raw_logits)
                     
@@ -102,9 +113,15 @@ def main():
     submission_dataframe = submission_dataframe.sort_values(by="row_id")
     
     final_output_csv = os.path.join(destination_artifacts_dir, "predictions.csv")
+    if time.monotonic() >= deadline:
+        raise TimeoutError(
+            "predict.py reached its time limit before output serialization."
+        )
     submission_dataframe.to_csv(final_output_csv, index=False)
+    elapsed = time.monotonic() - started
     print(f"-> [SUCCESS] Verification data compiled cleanly at: {final_output_csv}")
     print(f"-> Total evaluated instances committed: {len(submission_dataframe)}")
+    print(f"-> Prediction runtime: {elapsed:.1f}s / {parsed_runtime_args.timeout_seconds}s")
 
 if __name__ == "__main__":
     main()

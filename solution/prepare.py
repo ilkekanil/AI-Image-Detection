@@ -1,5 +1,7 @@
+import argparse
 import os
 import io
+import time
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -32,7 +34,7 @@ class AIImageDataset(Dataset):
 
 
 
-def compute_color_statistics(csv_source, npz_destination):
+def compute_color_statistics(csv_source, npz_destination, deadline=None):
     print(f"-> Extracting classical engineered features from: {csv_source}...")
     if not os.path.exists(csv_source):
         print(f"[ERROR] Source registry {csv_source} could not be located.")
@@ -43,6 +45,11 @@ def compute_color_statistics(csv_source, npz_destination):
     mapped_labels = []
     
     for _, current_row in source_df.iterrows():
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(
+                "prepare.py reached its time limit before feature extraction completed; "
+                "no partial feature file was written."
+            )
         img_path = current_row['image_path']
         if not os.path.exists(img_path):
             continue
@@ -75,9 +82,21 @@ def compute_color_statistics(csv_source, npz_destination):
 # Pipeline entry point
 
 if __name__ == "__main__":
-    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--timeout_seconds", type=int, default=600)
+    args = parser.parse_args()
+    started = time.monotonic()
+    # Keep a small reserve for serializing the completed feature matrix.
+    deadline = started + max(args.timeout_seconds, 1) * 0.95
+
     source_csv = os.path.join("artifacts", "task01", "cleaned_train", "labels.csv")
     target_npz = os.path.join("artifacts", "classical_train_features.npz") 
     
-    compute_color_statistics(source_csv, target_npz)
+    compute_color_statistics(source_csv, target_npz, deadline=deadline)
+    elapsed = time.monotonic() - started
+    if elapsed > args.timeout_seconds:
+        raise TimeoutError(
+            f"prepare.py exceeded its {args.timeout_seconds}-second time limit."
+        )
+    print(f"-> Preparation runtime: {elapsed:.1f}s / {args.timeout_seconds}s")
     print("=== Data Feature Preparation Sequence Terminated ===")

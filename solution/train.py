@@ -28,6 +28,7 @@ from prepare import AIImageDataset
 
 
 TASK2_IMAGE_SIZE = 128
+TASK2_TRAIN_IMAGE_SIZE = 120
 TARGET_CALIBRATION_FPR = 0.15  # statistical margin below the strict 20% limit
 
 
@@ -223,7 +224,10 @@ def main():
     started = time.monotonic()
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout_seconds", type=int, default=1800)
-    parser.add_argument("--epochs", type=int, default=8)
+    # Five complete epochs fit the Appendix C 5x runtime budget on the
+    # development CPU. A shorter deterministic run is safer than allowing a
+    # machine-dependent partial sixth/seventh epoch at the hard timeout.
+    parser.add_argument("--epochs", type=int, default=5)
     args = parser.parse_args()
 
     random.seed(42)
@@ -255,8 +259,9 @@ def main():
     print(f"-> Training samples: real={real_count}, AI={ai_count}")
 
     training_transform = transforms.Compose([
-        transforms.Resize((TASK2_IMAGE_SIZE, TASK2_IMAGE_SIZE)),
-        transforms.RandomHorizontalFlip(p=0.5),
+        # A slightly smaller training tensor reduces CPU cost by about 12%.
+        # The fully convolutional model is calibrated/inferred at 128px below.
+        transforms.Resize((TASK2_TRAIN_IMAGE_SIZE, TASK2_TRAIN_IMAGE_SIZE)),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
@@ -299,10 +304,12 @@ def main():
         model.train()
         running_loss = 0.0
         batches = 0
+        complete_epoch = True
         for images, batch_labels in train_loader:
             if time.monotonic() >= training_deadline:
-                print("-> Training time reserve reached; finalizing best checkpoint.")
+                print("-> Training time reserve reached; discarding the partial epoch.")
                 stop_training = True
+                complete_epoch = False
                 break
             optimizer.zero_grad(set_to_none=True)
             logits = model(images)
@@ -319,7 +326,9 @@ def main():
             running_loss += float(loss.item())
             batches += 1
 
-        if batches == 0:
+        # Never calibrate or save a speed-dependent partial epoch. This keeps
+        # checkpoint selection reproducible across native and Docker CPUs.
+        if not complete_epoch or batches == 0:
             break
         scheduler.step()
         mean_loss = running_loss / batches
