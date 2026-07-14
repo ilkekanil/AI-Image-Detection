@@ -1,8 +1,9 @@
-"""Train and calibrate the Task 2 AI-image detector on CPU.
+"""
+Trains and calibrates the Task 2 AI-image detector on CPU.
 
-The calibration split selects both the checkpoint and operating threshold.  The
-validation split is held out until the end and is used only to report whether the
-required operating point (AI recall >= 0.8 and real-image FPR <= 0.2) was met.
+We use the calibration split to pick the best model checkpoint and operating threshold. 
+The validation split is strictly held out until the very end, serving only to verify 
+if we met our target operating point (AI recall >= 0.8 and real-image FPR <= 0.2).
 """
 
 import argparse
@@ -28,7 +29,7 @@ from prepare import AIImageDataset
 
 
 TASK2_IMAGE_SIZE = 128
-TARGET_CALIBRATION_FPR = 0.15  # statistical margin below the strict 20% limit
+TARGET_CALIBRATION_FPR = 0.15  # Buffer margin to stay safely below the hard 20% limit
 
 
 class ConvBlock(nn.Sequential):
@@ -46,8 +47,8 @@ class CustomCNNDetector(nn.Module):
 
     def __init__(self, channels=32, dropout=0.25, num_classes=6):
         super().__init__()
-        # Concatenating a local residual helps preserve high-frequency generation
-        # artifacts while retaining the RGB content branch.
+        # Keeping a local residual helps catch high-frequency AI artifacts 
+        # without losing the broader RGB content.
         self.feature_extractor = nn.Sequential(
             ConvBlock(6, channels),
             ConvBlock(channels, 2 * channels),
@@ -143,7 +144,7 @@ def ai_probability(logits):
 
 
 def threshold_for_max_fpr(scores, labels, target_fpr=TARGET_CALIBRATION_FPR):
-    """Choose a deterministic threshold with empirical real-image FPR <= target."""
+    """Find the threshold that keeps the real-image FPR strictly under our target."""
     real_scores = np.sort(scores[labels == 0])
     if len(real_scores) == 0:
         raise ValueError("Calibration data contains no real images.")
@@ -152,8 +153,8 @@ def threshold_for_max_fpr(scores, labels, target_fpr=TARGET_CALIBRATION_FPR):
     if allowed_false_positives == 0:
         return float(np.nextafter(real_scores[-1], np.inf))
 
-    # Use the boundary itself when it admits exactly the allowed number. If
-    # tied scores would exceed the cap, move one representable value above it.
+    # Use the raw boundary if it gives us the exact count we want. 
+    # If tie scores push us over the FPR cap, bump the threshold up slightly.
     boundary = real_scores[-allowed_false_positives]
     if int(np.sum(real_scores >= boundary)) <= allowed_false_positives:
         return float(boundary)
@@ -278,8 +279,8 @@ def main():
     )
 
     model = CustomCNNDetector(channels=32)
-    # The six source classes are exactly balanced. The auxiliary binary loss
-    # ensures their shared real-vs-AI boundary remains the primary objective.
+    # Since the 6 source classes are balanced, using an auxiliary binary loss 
+    # keeps the model focused on the main goal: separating real vs. AI.
     criterion = nn.CrossEntropyLoss(label_smoothing=0.02)
     binary_criterion = nn.CrossEntropyLoss(
         weight=torch.tensor([math.sqrt(ai_count / real_count), 1.0])
@@ -292,7 +293,7 @@ def main():
     best_epoch = 0
     torch.save(model.state_dict(), checkpoint_path)
 
-    # Reserve time for calibration, final validation, and artifact writes.
+    # Cut off training early to leave enough time for calibration, validation, and saving files.
     training_deadline = started + args.timeout_seconds * 0.85
     stop_training = False
     for epoch in range(args.epochs):
