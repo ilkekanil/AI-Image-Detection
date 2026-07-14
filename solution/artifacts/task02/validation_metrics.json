@@ -1,0 +1,36 @@
+{
+  "protocol": {
+    "checkpoint_selection_split": "calibration",
+    "threshold_selection_split": "calibration",
+    "validation_used_for_tuning": false,
+    "target_calibration_fpr": 0.15,
+    "required_validation_fpr_max": 0.2,
+    "target_validation_recall_ai": 0.8
+  },
+  "best_epoch": 7,
+  "calibration": {
+    "samples": 1924,
+    "real_samples": 322,
+    "ai_samples": 1602,
+    "threshold": 0.8516794443130493,
+    "false_positives": 48,
+    "false_positive_rate": 0.14906832298136646,
+    "true_positives": 1378,
+    "recall_ai": 0.8601747815230961,
+    "accuracy": 0.8586278586278586
+  },
+  "validation": {
+    "samples": 1124,
+    "real_samples": 188,
+    "ai_samples": 936,
+    "threshold": 0.8516794443130493,
+    "false_positives": 23,
+    "false_positive_rate": 0.12234042553191489,
+    "true_positives": 822,
+    "recall_ai": 0.8782051282051282,
+    "accuracy": 0.8781138790035588,
+    "fpr_constraint_satisfied": true,
+    "recall_target_satisfied": true
+  },
+  "runtime_seconds": 1553.1208455830001
+}

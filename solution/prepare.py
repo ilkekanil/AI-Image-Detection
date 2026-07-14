@@ -7,10 +7,13 @@ from torch.utils.data import Dataset
 
 
 class AIImageDataset(Dataset):
-    def __init__(self, csv_path, transform=None):
+    def __init__(self, csv_path, transform=None, label_column="binary_label"):
 
         self.metadata_df = pd.read_csv(csv_path)
         self.transform = transform
+        if label_column not in self.metadata_df.columns:
+            raise ValueError(f"Unknown label column: {label_column}")
+        self.label_column = label_column
 
     def __len__(self):
         return len(self.metadata_df)
@@ -20,12 +23,12 @@ class AIImageDataset(Dataset):
         target_path = data_row['image_path']
         
         img_instance = Image.open(target_path).convert('RGB')
-        binary_label = int(data_row['binary_label'])
+        target_label = int(data_row[self.label_column])
 
         if self.transform:
             img_instance = self.transform(img_instance)
             
-        return img_instance, binary_label
+        return img_instance, target_label
 
 
 
@@ -77,4 +80,4 @@ if __name__ == "__main__":
     target_npz = os.path.join("artifacts", "classical_train_features.npz") 
     
     compute_color_statistics(source_csv, target_npz)
-    print("=== Data Feature Preparation Sequence Terminated ===") 
+    print("=== Data Feature Preparation Sequence Terminated ===")

@@ -3,10 +3,9 @@ import io
 import argparse
 import pandas as pd
 import torch
-import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image, ImageOps
-from train import CustomCNNDetector
+from train import CustomCNNDetector, ai_probability, evaluation_transform
 
 class InferenceImageDataset(Dataset):
     def __init__(self, parquet_path, target_transform=None):
@@ -66,10 +65,9 @@ def main():
     else:
         calibrated_operating_point = 0.50
 
-    evaluation_tensor_transforms = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    # This is the exact deterministic preprocessing used for calibration and
+    # held-out validation in train.py.
+    evaluation_tensor_transforms = evaluation_transform()
 
     collected_identifiers = []
     generated_predictions = []
@@ -89,8 +87,7 @@ def main():
             with torch.no_grad():
                 for process_images, process_ids in runtime_loader:
                     raw_logits = evaluation_engine(process_images)
-                    softmax_prob_spread = torch.softmax(raw_logits, dim=1)
-                    synthetic_class_probabilities = softmax_prob_spread[:, 1]
+                    synthetic_class_probabilities = ai_probability(raw_logits)
                     
                     binary_decisions = (synthetic_class_probabilities >= calibrated_operating_point).int()
                     

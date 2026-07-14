@@ -7,7 +7,12 @@ import torch.nn as nn
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 
-from train import CustomCNNDetector, ParquetCalibDataset
+from train import (
+    CustomCNNDetector,
+    ParquetCalibDataset,
+    ai_probability,
+    evaluation_transform,
+)
 from train_augmented import StrongerCNNDetector
 
 EVAL_TRANSFORM_224 = transforms.Compose([
@@ -47,15 +52,25 @@ def load_threshold(path, default=0.50):
             return float(f.read().strip())
     return default
 
-def collect_scores(model, data_dir, transform, tta=False):
+def collect_scores(model, data_dir, transform, tta=False, model_type="task3"):
     ds = ParquetCalibDataset(data_folder=data_dir, img_transformer=transform)
     loader = DataLoader(ds, batch_size=32, shuffle=False)
     scores, labels = [], []
     with torch.no_grad():
         for imgs, lbls in loader:
-            p = torch.softmax(model(imgs), dim=1)[:, 1]
+            logits = model(imgs)
+            p = (
+                ai_probability(logits)
+                if model_type == "task2"
+                else torch.softmax(logits, dim=1)[:, 1]
+            )
             if tta:
-                p_flip = torch.softmax(model(torch.flip(imgs, dims=[3])), dim=1)[:, 1]
+                flip_logits = model(torch.flip(imgs, dims=[3]))
+                p_flip = (
+                    ai_probability(flip_logits)
+                    if model_type == "task2"
+                    else torch.softmax(flip_logits, dim=1)[:, 1]
+                )
                 p = (p + p_flip) / 2.0
             scores.extend(p.cpu().numpy().tolist())
             labels.extend(lbls.numpy().tolist())
@@ -71,7 +86,7 @@ def metrics(scores, labels, threshold):
 
 def main():
     configs = [
-        ("Task 2 model", False, EVAL_TRANSFORM_224, "task2",
+        ("Task 2 model", False, evaluation_transform(), "task2",
          "artifacts/task02/best_model.pt",
          "artifacts/task02/calibrated_threshold.txt"),
         ("Task 3 model", False, EVAL_TRANSFORM_128, "task3",
@@ -103,11 +118,14 @@ def main():
             if split_dir is None:
                 print(f"{name:<24}{split_name:<24}[split not found]")
                 continue
-            scores, labels = collect_scores(model, split_dir, transform, tta=tta)
+            scores, labels = collect_scores(
+                model, split_dir, transform, tta=tta, model_type=model_type
+            )
             fpr, rec = metrics(scores, labels, threshold)
             print(f"{name:<24}{split_name:<24}{threshold:<12.4f}{fpr:<12.4f}{rec:<12.4f}")
     print("-" * 84)
-    print("Target: FPR_real <= 0.20  |  Task3 recall_ai >= 0.6 on validation_augmented\n")
+    print("Targets: FPR_real <= 0.20 | Task2 validation recall_ai >= 0.8 | "
+          "Task3 augmented recall_ai >= 0.6\n")
 
 if __name__ == "__main__":
     main()

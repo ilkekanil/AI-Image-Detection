@@ -1,179 +1,396 @@
-import os
-import io
-import time
+"""Train and calibrate the Task 2 AI-image detector on CPU.
+
+The calibration split selects both the checkpoint and operating threshold.  The
+validation split is held out until the end and is used only to report whether the
+required operating point (AI recall >= 0.8 and real-image FPR <= 0.2) was met.
+"""
+
 import argparse
+import io
+import json
+import math
+import os
+import random
+import time
+
 import numpy as np
 import pandas as pd
+from PIL import Image, ImageOps
+from sklearn.ensemble import RandomForestClassifier
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as transforms
-from sklearn.ensemble import RandomForestClassifier
-from PIL import Image, ImageOps
 
 from prepare import AIImageDataset
 
+
+TASK2_IMAGE_SIZE = 128
+TARGET_CALIBRATION_FPR = 0.15  # statistical margin below the strict 20% limit
+
+
+class ConvBlock(nn.Sequential):
+    def __init__(self, in_channels, out_channels):
+        super().__init__(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2),
+        )
+
+
 class CustomCNNDetector(nn.Module):
-    def __init__(self, channels=32):
-        super(CustomCNNDetector, self).__init__()
+    """Compact source-family CNN with an explicit residual input branch."""
+
+    def __init__(self, channels=32, dropout=0.25, num_classes=6):
+        super().__init__()
+        # Concatenating a local residual helps preserve high-frequency generation
+        # artifacts while retaining the RGB content branch.
         self.feature_extractor = nn.Sequential(
-            nn.Conv2d(3, channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2),
-            nn.Conv2d(channels, 2*channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2),
-            nn.Conv2d(2*channels, 4*channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1)
+            ConvBlock(6, channels),
+            ConvBlock(channels, 2 * channels),
+            ConvBlock(2 * channels, 4 * channels),
+            ConvBlock(4 * channels, 8 * channels),
+            nn.AdaptiveAvgPool2d(1),
         )
         self.fc_layer = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(4*channels, 2)
+            nn.Dropout(dropout),
+            nn.Linear(8 * channels, 2 * channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(2 * channels, num_classes),
         )
+
     def forward(self, x):
-        return self.fc_layer(self.feature_extractor(x))
+        local_mean = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+        residual = x - local_mean
+        return self.fc_layer(self.feature_extractor(torch.cat((x, residual), dim=1)))
+
 
 class ParquetCalibDataset(Dataset):
     def __init__(self, data_folder, img_transformer=None):
         self.img_transformer = img_transformer
-        self.pq_files = sorted([os.path.join(data_folder, f) for f in os.listdir(data_folder) if f.endswith('.parquet')])
-        
-        chunk_list = []
-        for file in self.pq_files:
-            chunk_df = pd.read_parquet(file, columns=["image", "source_class"])
-            chunk_list.append(chunk_df)
-        
-        if len(chunk_list) > 0:
-            self.main_df = pd.concat(chunk_list, ignore_index=True)
-        else:
-            self.main_df = pd.DataFrame(columns=["image", "source_class"])
+        self.pq_files = sorted(
+            os.path.join(data_folder, name)
+            for name in os.listdir(data_folder)
+            if name.endswith(".parquet")
+        )
+        chunks = [
+            pd.read_parquet(path, columns=["image", "source_class"])
+            for path in self.pq_files
+        ]
+        self.main_df = (
+            pd.concat(chunks, ignore_index=True)
+            if chunks
+            else pd.DataFrame(columns=["image", "source_class"])
+        )
 
     def __len__(self):
         return len(self.main_df)
 
     def __getitem__(self, index):
-        data_row = self.main_df.iloc[index]
-        raw_bytes = data_row['image']
-        src_cls = int(data_row['source_class'])
-        lbl = 0 if src_cls == 0 else 1
-        
-        with Image.open(io.BytesIO(raw_bytes)) as source_img:
-            source_img = ImageOps.exif_transpose(source_img)
-            source_img = source_img.convert("RGB")
-            source_img = source_img.resize((224, 224), Image.Resampling.BICUBIC)
-            
+        row = self.main_df.iloc[index]
+        label = 0 if int(row["source_class"]) == 0 else 1
+        with Image.open(io.BytesIO(row["image"])) as image:
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image = image.resize((224, 224), Image.Resampling.BICUBIC)
         if self.img_transformer:
-            source_img = self.img_transformer(source_img)
-        return source_img, lbl
+            image = self.img_transformer(image)
+        return image, label
 
-def run_threshold_calibration(target_model, calib_loader):
-    target_model.eval()
-    prob_accumulator = []
-    
-    print("-> Optimizing operational threshold using official calibration data...")
+
+def resolve_data_dir(name):
+    candidates = [
+        os.path.join("data", name),
+        os.path.join("..", "data", name),
+        os.path.join("..", "AML DATA", name),
+    ]
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def evaluation_transform():
+    return transforms.Compose([
+        transforms.Resize((TASK2_IMAGE_SIZE, TASK2_IMAGE_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        ),
+    ])
+
+
+def collect_scores(model, loader):
+    model.eval()
+    scores, labels = [], []
     with torch.no_grad():
-        for batch_imgs, batch_lbls in calib_loader:
-            net_outputs = target_model(batch_imgs)
-            prob_dist = torch.softmax(net_outputs, dim=1)
-            ai_scores = prob_dist[:, 1].cpu().numpy()
-            
-            real_masks = (batch_lbls == 0).numpy()
-            prob_accumulator.extend(ai_scores[real_masks])
-            
-    if len(prob_accumulator) == 0:
-        print("[WARN] No real samples located in calibration set. Defaulting to 0.50.")
-        return 0.50
-        
-    computed_th = float(np.percentile(prob_accumulator, 80))
-    print(f"-> Calibration successful. Determined decision threshold: {computed_th:.4f}")
-    return computed_th
+        for images, batch_labels in loader:
+            batch_scores = ai_probability(model(images))
+            scores.extend(batch_scores.cpu().numpy().tolist())
+            labels.extend(batch_labels.cpu().numpy().tolist())
+    return np.asarray(scores, dtype=np.float64), np.asarray(labels, dtype=np.int64)
+
+
+def ai_probability(logits):
+    """Convert six source-family logits to the required binary AI score."""
+    probabilities = torch.softmax(logits, dim=1)
+    return probabilities[:, 1:].sum(dim=1)
+
+
+def threshold_for_max_fpr(scores, labels, target_fpr=TARGET_CALIBRATION_FPR):
+    """Choose a deterministic threshold with empirical real-image FPR <= target."""
+    real_scores = np.sort(scores[labels == 0])
+    if len(real_scores) == 0:
+        raise ValueError("Calibration data contains no real images.")
+
+    allowed_false_positives = int(math.floor(target_fpr * len(real_scores)))
+    if allowed_false_positives == 0:
+        return float(np.nextafter(real_scores[-1], np.inf))
+
+    # Use the boundary itself when it admits exactly the allowed number. If
+    # tied scores would exceed the cap, move one representable value above it.
+    boundary = real_scores[-allowed_false_positives]
+    if int(np.sum(real_scores >= boundary)) <= allowed_false_positives:
+        return float(boundary)
+    return float(np.nextafter(boundary, np.inf))
+
+
+def classification_metrics(scores, labels, threshold):
+    predictions = (scores >= threshold).astype(np.int64)
+    real = labels == 0
+    ai = labels == 1
+    false_positives = int(np.sum(predictions[real] == 1))
+    true_positives = int(np.sum(predictions[ai] == 1))
+    return {
+        "samples": int(len(labels)),
+        "real_samples": int(np.sum(real)),
+        "ai_samples": int(np.sum(ai)),
+        "threshold": float(threshold),
+        "false_positives": false_positives,
+        "false_positive_rate": float(false_positives / np.sum(real)),
+        "true_positives": true_positives,
+        "recall_ai": float(true_positives / np.sum(ai)),
+        "accuracy": float(np.mean(predictions == labels)),
+    }
+
+
+def run_threshold_calibration(target_model, calib_loader, target_fpr=TARGET_CALIBRATION_FPR):
+    print(f"-> Calibrating threshold at empirical FPR <= {target_fpr:.0%}...")
+    scores, labels = collect_scores(target_model, calib_loader)
+    threshold = threshold_for_max_fpr(scores, labels, target_fpr)
+    metrics = classification_metrics(scores, labels, threshold)
+    print(
+        f"-> Calibration: threshold={threshold:.4f}, "
+        f"FPR={metrics['false_positive_rate']:.4f}, "
+        f"AI recall={metrics['recall_ai']:.4f}"
+    )
+    return threshold, metrics
+
+
+def make_parquet_loader(split_name, transform, batch_size=64):
+    split_dir = resolve_data_dir(split_name)
+    if split_dir is None:
+        return None
+    dataset = ParquetCalibDataset(split_dir, img_transformer=transform)
+    if len(dataset) == 0:
+        return None
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+
+
+def fit_classical_baseline(feature_path):
+    """Retain the required second model family for the report comparison."""
+    if not os.path.exists(feature_path):
+        print("[WARN] Classical feature file missing; run prepare.py first.")
+        return
+    data = np.load(feature_path)
+    baseline = RandomForestClassifier(
+        n_estimators=50,
+        max_depth=10,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+    )
+    baseline.fit(data["X"], data["y"])
+    print("-> Classical Random Forest comparison model fitted.")
+
 
 def main():
-    tick = time.monotonic()
-    cli_parser = argparse.ArgumentParser()
-    cli_parser.add_argument('--timeout_seconds', type=int, default=1800)
-    cmd_args = cli_parser.parse_args()
-    
+    started = time.monotonic()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--timeout_seconds", type=int, default=1800)
+    parser.add_argument("--epochs", type=int, default=8)
+    args = parser.parse_args()
+
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
     torch.set_num_threads(min(8, os.cpu_count() or 1))
     torch.set_num_interop_threads(1)
-    
-    target_dir = "artifacts/task02"
-    os.makedirs(target_dir, exist_ok=True)
-    
-    labels_csv_path = os.path.join("artifacts", "task01", "cleaned_train", "labels.csv")
-    feat_npz_path = os.path.join("artifacts", "classical_train_features.npz")
-    
-    calib_path = "data/calibration"
-    if not os.path.exists(calib_path):
-        calib_path = os.path.join("..", "data", "calibration")
-    if not os.path.exists(calib_path):
-        calib_path = os.path.join("..", "AML DATA", "calibration")
 
-    # 1. Classical Baseline
-    if os.path.exists(feat_npz_path):
-        binary_data = np.load(feat_npz_path)
-        features_x, labels_y = binary_data['X'], binary_data['y']
-        baseline_rf = RandomForestClassifier(n_estimators=50, max_depth=10, random_state=42, n_jobs=-1)
-        baseline_rf.fit(features_x, labels_y)
-        print("-> Classical baseline baseline_rf fit sequence completed.")
+    output_dir = os.path.join("artifacts", "task02")
+    os.makedirs(output_dir, exist_ok=True)
+    labels_path = os.path.join("artifacts", "task01", "cleaned_train", "labels.csv")
+    feature_path = os.path.join("artifacts", "classical_train_features.npz")
+    checkpoint_path = os.path.join(output_dir, "best_model.pt")
 
-    # 2. Deep Learning Pipeline
-    img_transforms = transforms.Compose([
+    fit_classical_baseline(feature_path)
+    if not os.path.exists(labels_path):
+        raise FileNotFoundError(f"Required cleaned labels are missing: {labels_path}")
+
+    calibration_loader = make_parquet_loader("calibration", evaluation_transform())
+    if calibration_loader is None:
+        raise FileNotFoundError("The required data/calibration split is missing or empty.")
+
+    labels_frame = pd.read_csv(labels_path)
+    counts = labels_frame["binary_label"].value_counts()
+    real_count = int(counts.get(0, 0))
+    ai_count = int(counts.get(1, 0))
+    if real_count == 0 or ai_count == 0:
+        raise ValueError("Training data must contain both real and AI images.")
+    print(f"-> Training samples: real={real_count}, AI={ai_count}")
+
+    training_transform = transforms.Compose([
+        transforms.Resize((TASK2_IMAGE_SIZE, TASK2_IMAGE_SIZE)),
+        transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        ),
     ])
-    
-    if os.path.exists(labels_csv_path):
-        train_set = AIImageDataset(csv_path=labels_csv_path, transform=img_transforms)
-        train_generator = DataLoader(train_set, batch_size=64, shuffle=True)
-        
-        neural_net = CustomCNNDetector(channels=32)
-        loss_fn = nn.CrossEntropyLoss()
-        weight_optimizer = optim.AdamW(neural_net.parameters(), lr=1e-3)
-        
-        max_epochs = 2
-        lowest_loss = float('inf')
-        
-        for ep in range(max_epochs):
-            neural_net.train()
-            total_loss = 0.0
-            for batch_imgs, batch_lbls in train_generator:
-                if time.monotonic() - tick > (cmd_args.timeout_seconds * 0.90):
-                    break
-                weight_optimizer.zero_grad(set_to_none=True)
-                predictions = neural_net(batch_imgs)
-                batch_loss = loss_fn(predictions, batch_lbls)
-                batch_loss.backward()
-                weight_optimizer.step()
-                total_loss += batch_loss.item()
-                
-            mean_ep_loss = total_loss / len(train_generator)
-            print(f"Epoch [{ep+1}/{max_epochs}] - Mean Loss: {mean_ep_loss:.4f}")
-            if mean_ep_loss < lowest_loss:
-                lowest_loss = mean_ep_loss
-                torch.save(neural_net.state_dict(), os.path.join(target_dir, "best_model.pt"))
-    else:
-        print("[ERROR] Required dataset labels.csv missing.")
-        return
+    train_dataset = AIImageDataset(
+        labels_path,
+        transform=training_transform,
+        label_column="source_class",
+    )
+    generator = torch.Generator().manual_seed(42)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=128,
+        shuffle=True,
+        generator=generator,
+        num_workers=0,
+    )
 
-    # 3. Automation of Calibration Point
-    if os.path.exists(calib_path) and len([f for f in os.listdir(calib_path) if f.endswith('.parquet')]) > 0:
-        try:
-            calib_dataset = ParquetCalibDataset(data_folder=calib_path, img_transformer=img_transforms)
-            calib_generator = DataLoader(calib_dataset, batch_size=32, shuffle=False)
-            final_th = run_threshold_calibration(neural_net, calib_generator)
-        except Exception as runtime_err:
-            print(f"[WARN] Runtime error encountered: {runtime_err}. Using backup threshold.")
-            final_th = 0.50
+    model = CustomCNNDetector(channels=32)
+    # The six source classes are exactly balanced. The auxiliary binary loss
+    # ensures their shared real-vs-AI boundary remains the primary objective.
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.02)
+    binary_criterion = nn.CrossEntropyLoss(
+        weight=torch.tensor([math.sqrt(ai_count / real_count), 1.0])
+    )
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    best_recall = -1.0
+    best_calibration = None
+    best_epoch = 0
+    torch.save(model.state_dict(), checkpoint_path)
+
+    # Reserve time for calibration, final validation, and artifact writes.
+    training_deadline = started + args.timeout_seconds * 0.85
+    stop_training = False
+    for epoch in range(args.epochs):
+        model.train()
+        running_loss = 0.0
+        batches = 0
+        for images, batch_labels in train_loader:
+            if time.monotonic() >= training_deadline:
+                print("-> Training time reserve reached; finalizing best checkpoint.")
+                stop_training = True
+                break
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(images)
+            classification_loss = criterion(logits, batch_labels)
+            binary_labels = (batch_labels != 0).long()
+            binary_logits = torch.stack(
+                (logits[:, 0], torch.logsumexp(logits[:, 1:], dim=1)), dim=1
+            )
+            loss = classification_loss + 0.25 * binary_criterion(
+                binary_logits, binary_labels
+            )
+            loss.backward()
+            optimizer.step()
+            running_loss += float(loss.item())
+            batches += 1
+
+        if batches == 0:
+            break
+        scheduler.step()
+        mean_loss = running_loss / batches
+        threshold, calibration_metrics = run_threshold_calibration(
+            model, calibration_loader, TARGET_CALIBRATION_FPR
+        )
+        current_recall = calibration_metrics["recall_ai"]
+        print(
+            f"Epoch [{epoch + 1}/{args.epochs}] loss={mean_loss:.4f}, "
+            f"calibration recall={current_recall:.4f}"
+        )
+        if current_recall > best_recall:
+            best_recall = current_recall
+            best_calibration = calibration_metrics
+            best_epoch = epoch + 1
+            torch.save(model.state_dict(), checkpoint_path)
+            print("   Saved improved FPR-constrained checkpoint.")
+        if stop_training:
+            break
+
+    model.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=True))
+    final_threshold, final_calibration = run_threshold_calibration(
+        model, calibration_loader, TARGET_CALIBRATION_FPR
+    )
+    with open(os.path.join(output_dir, "calibrated_threshold.txt"), "w", encoding="utf-8") as stream:
+        stream.write(f"{final_threshold:.17g}\n")
+
+    summary = {
+        "protocol": {
+            "checkpoint_selection_split": "calibration",
+            "threshold_selection_split": "calibration",
+            "validation_used_for_tuning": False,
+            "target_calibration_fpr": TARGET_CALIBRATION_FPR,
+            "required_validation_fpr_max": 0.20,
+            "target_validation_recall_ai": 0.80,
+        },
+        "best_epoch": best_epoch,
+        "calibration": final_calibration,
+    }
+
+    validation_loader = make_parquet_loader("validation", evaluation_transform())
+    if validation_loader is not None:
+        validation_scores, validation_labels = collect_scores(model, validation_loader)
+        validation_metrics = classification_metrics(
+            validation_scores, validation_labels, final_threshold
+        )
+        validation_metrics["fpr_constraint_satisfied"] = (
+            validation_metrics["false_positive_rate"] <= 0.20
+        )
+        validation_metrics["recall_target_satisfied"] = (
+            validation_metrics["recall_ai"] >= 0.80
+        )
+        summary["validation"] = validation_metrics
+        print(
+            "-> HELD-OUT VALIDATION: "
+            f"FPR={validation_metrics['false_positive_rate']:.4f}, "
+            f"AI recall={validation_metrics['recall_ai']:.4f}"
+        )
+        if not validation_metrics["fpr_constraint_satisfied"]:
+            print("[WARN] The strict validation FPR <= 0.20 requirement was not met.")
+        if not validation_metrics["recall_target_satisfied"]:
+            print("[WARN] The target validation AI recall >= 0.80 was not met.")
     else:
-        final_th = 0.50
-        print("[WARN] Local calibration directory unallocated or empty. Fallback activated.")
-        
-    with open(os.path.join(target_dir, "calibrated_threshold.txt"), "w") as th_file:
-        th_file.write(str(final_th))
-    print("=== Pipeline execution sequence finalized successfully ===")
+        print("[WARN] Validation split unavailable; independent verification was skipped.")
+
+    summary["runtime_seconds"] = time.monotonic() - started
+    with open(os.path.join(output_dir, "validation_metrics.json"), "w", encoding="utf-8") as stream:
+        json.dump(summary, stream, indent=2)
+        stream.write("\n")
+    print("=== Task 2 training and constrained calibration completed ===")
+
 
 if __name__ == "__main__":
     main()
