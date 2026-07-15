@@ -68,8 +68,8 @@ def main():
     else:
         calibrated_operating_point = 0.50
 
-    # This is the exact deterministic preprocessing used for calibration and
-    # held-out validation in train.py.
+
+    # This is the exact same deterministic preprocessing we used for calibration and validation in train.py.
     evaluation_tensor_transforms = evaluation_transform()
 
     collected_identifiers = []
