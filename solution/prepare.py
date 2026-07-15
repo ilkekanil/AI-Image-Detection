@@ -79,14 +79,12 @@ def compute_color_statistics(csv_source, npz_destination, deadline=None):
 
 
 
-# Pipeline entry point
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout_seconds", type=int, default=600)
     args = parser.parse_args()
     started = time.monotonic()
-    # Keep a small reserve for serializing the completed feature matrix.
+    # reserving a 5% time buffer to make sure we can save the heavy NPZ file before getting timed out
     deadline = started + max(args.timeout_seconds, 1) * 0.95
 
     source_csv = os.path.join("artifacts", "task01", "cleaned_train", "labels.csv")
