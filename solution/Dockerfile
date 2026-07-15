@@ -1,10 +1,10 @@
-# Python 3.11 and requires a CPU-only image.
+# it standardizes on Python 3.11 with a lightweight, CPU-focused base image.
 FROM python:3.11-slim
 
 WORKDIR /workspace/solution
 
-# Keep Python deterministic/non-interactive and place runtime caches below the
-# only writable project directory required by the exercise specification.
+# Enforces deterministic Python execution and redirects all runtime cache directories 
+# to a subfolder within our project structure (avoiding write permission issues in read-only systems).
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONHASHSEED=0 \
@@ -15,13 +15,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     OMP_NUM_THREADS=8 \
     MKL_NUM_THREADS=8
 
-# scikit-learn's Linux wheel uses the GNU OpenMP runtime. No compiler or GPU
-# libraries are needed because all Python dependencies have binary CPU wheels.
+# installs LibGOMP (required by scikit-learn's CPU wheels) while keeping the image size 
+# minimal. No CUDA or GPU compiler toolchains are needed here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency metadata first so Docker can cache this expensive layer.
+# Cache the pip dependencies layer first to speed up future builds when code changes.
 COPY requirements.txt ./requirements.txt
 
 RUN python -m pip install --upgrade pip \
@@ -31,10 +31,10 @@ RUN python -m pip install --upgrade pip \
         torch==2.5.1 \
         torchvision==0.20.1
 
-# data/ and generated artifacts/ are excluded by .dockerignore. During grading,
-# data/ is mounted read-only and every script writes derived files to artifacts/.
+# Exclude raw datasets and generated artifacts via .dockerignore. 
+# During evaluation, data splits are mounted read-only, and outputs are written to artifacts/.
 COPY . .
 RUN mkdir -p artifacts/.matplotlib artifacts/.cache
 
-# Fail the build early if the scientific stack or project modules are broken.
+# runs a quick smoke test to catch any broken scientific packages or import errors before finishing the build.
 RUN python -c "import matplotlib, numpy, pandas, PIL, pyarrow, sklearn, torch, torchvision; import clean, prepare, train, train_augmented, predict, predict_augmented, explain"
