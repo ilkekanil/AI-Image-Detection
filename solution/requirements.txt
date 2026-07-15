@@ -1,5 +1,5 @@
-# Non-PyTorch runtime dependencies. Torch and torchvision are installed from
-# the official CPU-only wheel index in the Dockerfile.
+# General third-party dependencies (excluding PyTorch and Torchvision, 
+# which are loaded separately via the official CPU-only index in our Dockerfile).
 numpy==1.26.4
 pandas==2.1.4
 pyarrow==14.0.2
