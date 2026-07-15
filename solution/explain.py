@@ -150,7 +150,7 @@ def resolve_split_dir(name: str, script_dir: Path) -> Path:
 
 
 def load_final_model(checkpoint: Path) -> StrongerCNNDetector:
-   """it loads our final Task 1.3 model architecture and maps the saved weights to CPU."""
+    """it loads our final Task 1.3 model architecture and maps the saved weights to CPU."""
     if not checkpoint.is_file():
         raise FileNotFoundError(
             f"Task 1.3 checkpoint is missing: {checkpoint}. Run train_augmented.py first."
@@ -314,7 +314,7 @@ def choose_balanced(candidates: pd.DataFrame, count: int) -> list[int]:
 
 
 def select_examples(results: pd.DataFrame, maximum: int) -> pd.DataFrame:
-   """Pick a balanced, representative mix of high-confidence predictions, errors, and borderline cases."""
+    """Pick a balanced, representative mix of high-confidence predictions, errors, and borderline cases."""
     if results.empty or maximum <= 0:
         return results.iloc[0:0].copy()
     work = results.copy()
