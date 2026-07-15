@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Task 1.1: Dataset exploration and deterministic cleaning.
-
-This script only reads data/train/*.parquet and writes all outputs below
-artifacts/task01/. It is designed to run inside the submitted solution folder:
+"""
+This script pulls raw training data from `data/train/*.parquet` and writes everything 
+clean and tidy into `artifacts/task01/`. Run it directly from your solution folder like so:
 
     python clean.py --timeout_seconds 600
 
-The cleaning step is intentionally deterministic. It converts each readable image
-to RGB and resizes it to 224x224, but it does not apply random augmentation.
+To keep things consistent and predictable, the cleaning step is entirely deterministic. 
+We'll convert every readable image to RGB and resize it to a uniform 224x224, holding off 
+on any random data augmentations for now.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ import time
 from io import BytesIO
 from pathlib import Path
 
-# Matplotlib may try to write caches to the user's home directory. In Docker or
-# restricted environments, a temporary directory is safer and keeps the script
-# self-contained.
+# Matplotlib defaults to writing caches to the user's home directory, which often breaks 
+# inside Docker or read-only environments. Pointing it to a temp folder keeps everything 
+# self-contained and headache-free.
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "amls_matplotlib"))
 
 import matplotlib
@@ -57,10 +57,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_data_dir(data_dir_arg: Path | None) -> Path:
-    """Find the dataset directory without touching non-train splits.
+    """Locates the training data directory while leaving other splits untouched.
 
-    In grading, the expected path is solution/data/train. During local work in
-    this workspace, the data may also be one directory above solution/.
+    During autograding, the script expects to find the data at `solution/data/train`. 
+    When working locally in this workspace, the files might also live one level up.
     """
     if data_dir_arg is not None:
         data_dir = data_dir_arg
@@ -120,7 +120,7 @@ def remove_file_if_exists(path: Path) -> None:
 
 
 def clean_previous_task01_outputs(task_dir: Path) -> None:
-    """Remove generated files from earlier Task 1.1 script versions."""
+    """Clears out any leftover files from previous runs of this script so we start fresh."""
     for filename in STALE_ROOT_FILES:
         remove_file_if_exists(task_dir / filename)
 
@@ -152,12 +152,7 @@ def numeric_summary(series: pd.Series) -> dict[str, float]:
 
 
 def decode_rgb(image_bytes: bytes) -> Image.Image:
-    """Decode bytes, honor EXIF orientation, and convert to RGB.
 
-    RGB conversion gives all downstream models the same three-channel input
-    shape, independent of whether an original image used grayscale, palette, or
-    another JPEG mode.
-    """
     with Image.open(BytesIO(image_bytes)) as image:
         image = ImageOps.exif_transpose(image)
         return image.convert("RGB")
@@ -187,11 +182,12 @@ def image_statistics(image: Image.Image, byte_size: int) -> dict[str, float | in
 
 
 def save_cleaned_image(image: Image.Image, output_path: Path) -> None:
-    """Save the deterministic cleaned image.
+    """Saves the cleaned image using a deterministic process.
 
-    Resizing to 224x224 removes original dimension shortcuts and keeps later CPU
-    training manageable. No random crop, color jitter, or augmentation is used
-    because Task 1.1 is about exploration and cleaning only.
+    Resizing to 224x224 stops the model from 'cheating' by using original image dimensions, 
+    and it keeps downstream training light enough for local CPU runs. We are skipping 
+    data augmentations (like crops or jitter) here because this stage is strictly about 
+    data exploration and preparation.
     """
     cleaned = image.resize((CLEANED_SIZE, CLEANED_SIZE), Image.Resampling.BICUBIC)
     cleaned.save(output_path, format="JPEG", quality=JPEG_QUALITY, optimize=True)
