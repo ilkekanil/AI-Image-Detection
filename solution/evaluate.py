@@ -1,5 +1,6 @@
-# helper script for the report - compares the task2 and task3 models on
-# validation and validation_augmented (FPR and recall). not required for submission.
+# Quick helper script for our report. It compares the Task 2 and Task 3 models 
+# on both the standard 'validation' and 'validation_augmented' splits (tracking FPR and Recall). 
+# Note: This is purely for our own analysis/writing and is not required for submission.
 import os
 import numpy as np
 import torch
