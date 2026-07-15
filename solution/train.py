@@ -1,8 +1,9 @@
-"""Train and calibrate the Task 2 AI-image detector on CPU.
+"""Trains and calibrates our Task 2 AI-image detector on CPU.
 
-The calibration split selects both the checkpoint and operating threshold.  The
-validation split is held out until the end and is used only to report whether the
-required operating point (AI recall >= 0.8 and real-image FPR <= 0.2) was met.
+We use the calibration split to select our best model checkpoint and set the decision 
+threshold. The validation split is kept completely hidden until the very end, serving 
+strictly as a final test to check if we meet our target metrics (AI recall >= 0.8 
+and real-image FPR <= 0.2).
 """
 
 import argparse
@@ -29,7 +30,7 @@ from prepare import AIImageDataset
 
 TASK2_IMAGE_SIZE = 128
 TASK2_TRAIN_IMAGE_SIZE = 120
-TARGET_CALIBRATION_FPR = 0.15  # statistical margin below the strict 20% limit
+TARGET_CALIBRATION_FPR = 0.15  # We set a slightly stricter FPR target here to give us a safety margin below the official 20% limit
 
 
 class ConvBlock(nn.Sequential):
@@ -47,8 +48,6 @@ class CustomCNNDetector(nn.Module):
 
     def __init__(self, channels=32, dropout=0.25, num_classes=6):
         super().__init__()
-        # Concatenating a local residual helps preserve high-frequency generation
-        # artifacts while retaining the RGB content branch.
         self.feature_extractor = nn.Sequential(
             ConvBlock(6, channels),
             ConvBlock(channels, 2 * channels),
@@ -138,13 +137,13 @@ def collect_scores(model, loader):
 
 
 def ai_probability(logits):
-    """Convert six source-family logits to the required binary AI score."""
+    """Maps our 6-class generator logits to a single, binary AI probability score."""
     probabilities = torch.softmax(logits, dim=1)
     return probabilities[:, 1:].sum(dim=1)
 
 
 def threshold_for_max_fpr(scores, labels, target_fpr=TARGET_CALIBRATION_FPR):
-    """Choose a deterministic threshold with empirical real-image FPR <= target."""
+    """Calculates a stable, deterministic threshold that guarantees the real-image FPR stays below our target."""
     real_scores = np.sort(scores[labels == 0])
     if len(real_scores) == 0:
         raise ValueError("Calibration data contains no real images.")
@@ -152,9 +151,10 @@ def threshold_for_max_fpr(scores, labels, target_fpr=TARGET_CALIBRATION_FPR):
     allowed_false_positives = int(math.floor(target_fpr * len(real_scores)))
     if allowed_false_positives == 0:
         return float(np.nextafter(real_scores[-1], np.inf))
-
-    # Use the boundary itself when it admits exactly the allowed number. If
-    # tied scores would exceed the cap, move one representable value above it.
+        
+    # Use the boundary score if it allows the exact number of false positives we expect. 
+    # If tied scores threaten to push us past our allowed limit, we shift the threshold 
+    # up by the smallest possible float value.
     boundary = real_scores[-allowed_false_positives]
     if int(np.sum(real_scores >= boundary)) <= allowed_false_positives:
         return float(boundary)
@@ -224,9 +224,9 @@ def main():
     started = time.monotonic()
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout_seconds", type=int, default=1800)
-    # Five complete epochs fit the Appendix C 5x runtime budget on the
-    # development CPU. A shorter deterministic run is safer than allowing a
-    # machine-dependent partial sixth/seventh epoch at the hard timeout.
+    # Running 5 epochs keeps our pipeline comfortably within the expected CPU runtime limits. 
+    # It is much safer to finish a fixed number of epochs than to risk getting cut off 
+    # mid-epoch by a hard timeout.
     parser.add_argument("--epochs", type=int, default=5)
     args = parser.parse_args()
 
@@ -259,8 +259,6 @@ def main():
     print(f"-> Training samples: real={real_count}, AI={ai_count}")
 
     training_transform = transforms.Compose([
-        # A slightly smaller training tensor reduces CPU cost by about 12%.
-        # The fully convolutional model is calibrated/inferred at 128px below.
         transforms.Resize((TASK2_TRAIN_IMAGE_SIZE, TASK2_TRAIN_IMAGE_SIZE)),
         transforms.ToTensor(),
         transforms.Normalize(
@@ -283,8 +281,8 @@ def main():
     )
 
     model = CustomCNNDetector(channels=32)
-    # The six source classes are exactly balanced. The auxiliary binary loss
-    # ensures their shared real-vs-AI boundary remains the primary objective.
+    # Our six source classes are perfectly balanced. Including an auxiliary binary loss 
+    # ensures that finding the boundary between real and AI images remains our main training objective.
     criterion = nn.CrossEntropyLoss(label_smoothing=0.02)
     binary_criterion = nn.CrossEntropyLoss(
         weight=torch.tensor([math.sqrt(ai_count / real_count), 1.0])
@@ -297,7 +295,7 @@ def main():
     best_epoch = 0
     torch.save(model.state_dict(), checkpoint_path)
 
-    # Reserve time for calibration, final validation, and artifact writes.
+    
     training_deadline = started + args.timeout_seconds * 0.85
     stop_training = False
     for epoch in range(args.epochs):
@@ -326,8 +324,8 @@ def main():
             running_loss += float(loss.item())
             batches += 1
 
-        # Never calibrate or save a speed-dependent partial epoch. This keeps
-        # checkpoint selection reproducible across native and Docker CPUs.
+        # Never evaluate or save a checkpoint on an incomplete, timed-out epoch. 
+        # This keeps our model selection completely consistent across different CPU environments.
         if not complete_epoch or batches == 0:
             break
         scheduler.step()
